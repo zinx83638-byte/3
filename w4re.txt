@@ -1,0 +1,744 @@
+local KEY = "_TouchlineReach"
+local MAX_STUDS = 10
+local DEFAULT_STUDS = 8
+local VIZ_NAME = "TouchlineReachViz"
+
+do
+	local prev = rawget(_G, KEY)
+	if type(prev) == "table" then
+		prev.dead = true
+		if prev.charConn then
+			pcall(function()
+				prev.charConn:Disconnect()
+			end)
+		end
+		if prev.viz then
+			pcall(function()
+				prev.viz:Destroy()
+			end)
+		end
+		if type(prev.restoreCG) == "function" then
+			pcall(prev.restoreCG)
+		end
+	end
+	pcall(function()
+		for _, c in ipairs(workspace.Terrain:GetChildren()) do
+			if c.Name == VIZ_NAME then
+				c:Destroy()
+			end
+		end
+	end)
+end
+
+local Players = game:GetService("Players")
+local RunService = game:GetService("RunService")
+local Workspace = game:GetService("Workspace")
+
+local LocalPlayer = Players.LocalPlayer
+
+local state = {
+	dead = false,
+	enabled = true,
+	studs = DEFAULT_STUDS,
+	ballCol = true,
+	showViz = false,
+	folder = nil,
+	hrp = nil,
+	char = nil,
+	bodyParts = nil,
+	charConn = nil,
+	viz = nil,
+	vizHb = nil,
+	savedCG = {},
+}
+
+_G[KEY] = state
+_G.TouchlineReach = nil
+
+local function clamp(n, a, b)
+	n = tonumber(n) or a
+	return math.max(a, math.min(b, n))
+end
+
+local function getChar()
+	local c = state.char
+	if c and c.Parent then
+		return c
+	end
+	local folder = Workspace:FindFirstChild("Characters")
+	if folder then
+		c = folder:FindFirstChild(LocalPlayer.Name)
+	end
+	if not c then
+		c = LocalPlayer.Character
+	end
+	state.char = c
+	state.hrp = nil
+	state.bodyParts = nil
+	return c
+end
+
+local function getHrp()
+	local hrp = state.hrp
+	if hrp and hrp.Parent then
+		return hrp
+	end
+	local char = getChar()
+	hrp = char and char:FindFirstChild("HumanoidRootPart")
+	state.hrp = hrp
+	return hrp
+end
+
+local BODY_NAMES = {
+	"HumanoidRootPart",
+	"Head",
+	"Torso",
+	"UpperTorso",
+	"LowerTorso",
+	"Left Leg",
+	"Right Leg",
+	"LeftUpperLeg",
+	"LeftLowerLeg",
+	"LeftFoot",
+	"RightUpperLeg",
+	"RightLowerLeg",
+	"RightFoot",
+	"Left Arm",
+	"Right Arm",
+}
+
+local function getBodyParts()
+	local cached = state.bodyParts
+	if cached then
+		local ok = true
+		for i = 1, #cached do
+			if not cached[i].Parent then
+				ok = false
+				break
+			end
+		end
+		if ok then
+			return cached
+		end
+	end
+	local char = getChar()
+	if not char then
+		return {}
+	end
+	local parts = {}
+	for i = 1, #BODY_NAMES do
+		local p = char:FindFirstChild(BODY_NAMES[i])
+		if p and p:IsA("BasePart") then
+			parts[#parts + 1] = p
+		end
+	end
+	state.bodyParts = parts
+	return parts
+end
+
+local function footballs()
+	local f = state.folder
+	if f and f.Parent then
+		return f
+	end
+	f = Workspace:FindFirstChild("Footballs")
+	state.folder = f
+	return f
+end
+
+local function isPlayBall(p)
+	return p
+		and p:IsA("BasePart")
+		and p.Name == "Ball"
+		and not p.Anchored
+		and p.Parent
+		and p.Parent.Name == "Footballs"
+end
+
+local function distToBody(ball, parts)
+	local best = math.huge
+	local pos = ball.Position
+	for i = 1, #parts do
+		local d = (pos - parts[i].Position).Magnitude
+		if d < best then
+			best = d
+		end
+	end
+	return best
+end
+
+local function ballInReach(ball, studs)
+	local hrp = getHrp()
+	if not hrp then
+		return false
+	end
+
+	local parts = getBodyParts()
+	if #parts == 0 then
+		parts = { hrp }
+	end
+
+	if distToBody(ball, parts) <= studs then
+		return true
+	end
+
+	local localPos = hrp.CFrame:PointToObjectSpace(ball.Position)
+	if localPos.Y > 0.25 then
+		local char = getChar()
+		local head = char and char:FindFirstChild("Head")
+		if head and head:IsA("BasePart") then
+			if (ball.Position - head.Position).Magnitude <= studs then
+				return true
+			end
+		end
+		local xz = math.sqrt(localPos.X * localPos.X + localPos.Z * localPos.Z)
+		if xz <= studs and localPos.Y <= studs + 2 then
+			return true
+		end
+	end
+
+	return false
+end
+
+local function nearestBall(studs)
+	local folder = footballs()
+	if not folder then
+		return nil
+	end
+	local hrp = getHrp()
+	if not hrp then
+		return nil
+	end
+
+	local parts = getBodyParts()
+	if #parts == 0 then
+		parts = { hrp }
+	end
+
+	local best, bestD = nil, math.huge
+	for _, child in ipairs(folder:GetChildren()) do
+		if isPlayBall(child) and ballInReach(child, studs) then
+			local d = distToBody(child, parts)
+			local localY = hrp.CFrame:PointToObjectSpace(child.Position).Y
+			if localY > 0.25 then
+				local char = getChar()
+				local head = char and char:FindFirstChild("Head")
+				if head and head:IsA("BasePart") then
+					d = math.min(d, (child.Position - head.Position).Magnitude)
+				end
+			end
+			if d < bestD then
+				bestD = d
+				best = child
+			end
+		end
+	end
+	return best
+end
+
+local function isTouchHitbox(size)
+	if typeof(size) ~= "Vector3" then
+		return false
+	end
+	return size.X >= 1.5
+		and size.X <= 8
+		and size.Y >= 2.5
+		and size.Y <= 10
+		and size.Z >= 1
+		and size.Z <= 10
+end
+
+local function inject(results, studs)
+	local ball = nearestBall(studs)
+	if not ball then
+		return results
+	end
+	for i = 1, #results do
+		if results[i] == ball then
+			return results
+		end
+	end
+	results[#results + 1] = ball
+	return results
+end
+
+local function saveAndSetCG(char, group)
+	if not char then
+		return
+	end
+	for _, p in ipairs(char:GetDescendants()) do
+		if p:IsA("BasePart") then
+			if state.savedCG[p] == nil then
+				state.savedCG[p] = p.CollisionGroup
+			end
+			pcall(function()
+				p.CollisionGroup = group
+			end)
+		end
+	end
+end
+
+local function restoreCG()
+	for part, group in pairs(state.savedCG) do
+		if part and part.Parent then
+			pcall(function()
+				part.CollisionGroup = group
+			end)
+		end
+	end
+	table.clear(state.savedCG)
+end
+
+state.restoreCG = restoreCG
+
+local function applyBallCol()
+	local char = getChar()
+	if not char then
+		return
+	end
+	if state.ballCol then
+		if next(state.savedCG) then
+			restoreCG()
+		else
+			saveAndSetCG(char, "Player")
+			restoreCG()
+		end
+	else
+		saveAndSetCG(char, "SelfPhase")
+	end
+end
+
+local function destroyViz()
+	if state.vizHb then
+		pcall(function()
+			state.vizHb:Disconnect()
+		end)
+		state.vizHb = nil
+	end
+	if state.viz then
+		pcall(function()
+			state.viz:Destroy()
+		end)
+		state.viz = nil
+	end
+end
+
+local function ensureViz()
+	destroyViz()
+	if not state.showViz or state.dead then
+		return
+	end
+
+	local part = Instance.new("Part")
+	part.Name = VIZ_NAME
+	part.Shape = Enum.PartType.Ball
+	part.Anchored = true
+	part.CanCollide = false
+	part.CanTouch = false
+	part.CanQuery = false
+	part.CastShadow = false
+	part.Material = Enum.Material.ForceField
+	part.Color = Color3.fromRGB(120, 200, 255)
+	part.Transparency = 0.85
+	part.Parent = Workspace.Terrain
+	state.viz = part
+
+	state.vizHb = RunService.RenderStepped:Connect(function()
+		if state.dead or not state.showViz then
+			return
+		end
+		local hrp = getHrp()
+		if not hrp or not state.viz then
+			return
+		end
+		local d = clamp(state.studs, 1, MAX_STUDS) * 2
+		state.viz.Size = Vector3.new(d, d, d)
+		state.viz.CFrame = CFrame.new(hrp.Position)
+		state.viz.Transparency = state.enabled and 0.85 or 0.95
+	end)
+end
+
+local function process(self, cf, size, params, callOld)
+	local results = callOld(self, cf, size, params)
+
+	local st = rawget(_G, KEY)
+	if not st or st.dead or not st.enabled then
+		return results
+	end
+
+	if not isTouchHitbox(size) then
+		return results
+	end
+
+	local chars = Workspace:FindFirstChild("Characters")
+	if not chars or not chars:FindFirstChild(LocalPlayer.Name) then
+		return results
+	end
+
+	if not getHrp() then
+		return results
+	end
+
+	return inject(results, clamp(st.studs, 1, MAX_STUDS))
+end
+
+_G._TouchlineReachProcess = process
+
+if not _G._TouchlineReachNC then
+	local old
+	local calling = false
+	old = hookmetamethod(game, "__namecall", function(self, ...)
+		if calling then
+			return old(self, ...)
+		end
+		local method = getnamecallmethod()
+		if method == "GetPartBoundsInBox" and self == Workspace then
+			local cf, size, params = ...
+			local fn = rawget(_G, "_TouchlineReachProcess")
+			if type(fn) == "function" then
+				calling = true
+				local ok, a, b, c = pcall(function()
+					return fn(self, cf, size, params, function(s, cframe, sz, pr)
+						return old(s, cframe, sz, pr)
+					end)
+				end)
+				calling = false
+				if ok then
+					return a, b, c
+				end
+				return old(self, ...)
+			end
+		end
+		return old(self, ...)
+	end)
+	_G._TouchlineReachNC = true
+end
+
+state.charConn = LocalPlayer.CharacterAdded:Connect(function()
+	state.char = nil
+	state.hrp = nil
+	state.bodyParts = nil
+	table.clear(state.savedCG)
+	task.defer(function()
+		if state.dead then
+			return
+		end
+		getChar()
+		if not state.ballCol then
+			applyBallCol()
+		end
+		if state.showViz then
+			ensureViz()
+		end
+	end)
+end)
+
+local api = {}
+
+function api.enable()
+	state.enabled = true
+end
+
+function api.disable()
+	state.enabled = false
+end
+
+function api.setStuds(n)
+	state.studs = clamp(n, 1, MAX_STUDS)
+end
+
+function api.setBallCol(on)
+	state.ballCol = on and true or false
+	applyBallCol()
+end
+
+function api.setViz(on)
+	state.showViz = on and true or false
+	if state.showViz then
+		ensureViz()
+	else
+		destroyViz()
+	end
+end
+
+function api.cleanup()
+	state.dead = true
+	state.enabled = false
+	if state.charConn then
+		pcall(function()
+			state.charConn:Disconnect()
+		end)
+		state.charConn = nil
+	end
+	destroyViz()
+	restoreCG()
+	_G._TouchlineReachProcess = nil
+	_G.TouchlineReach = nil
+	_G[KEY] = nil
+end
+
+function api.status()
+	return {
+		enabled = state.enabled,
+		studs = state.studs,
+		ballCol = state.ballCol,
+		showViz = state.showViz,
+		char = getChar() and getChar().Name or nil,
+	}
+end
+
+_G.TouchlineReach = api
+
+api.setStuds(DEFAULT_STUDS)
+api.setBallCol(true)
+
+print(string.format(
+	"[TouchlineReach] ready | studs=%s ballCol=%s | _G.TouchlineReach",
+	tostring(state.studs),
+	tostring(state.ballCol)
+))
+
+local KAIRO_URL =
+	"https://raw.githubusercontent.com/Itzzavi335/Kairo-Ui-Library/refs/heads/main/source.luau"
+
+local okKairo, KairoOrErr = pcall(function()
+	return loadstring(game:HttpGet(KAIRO_URL))()
+end)
+
+if not okKairo or type(KairoOrErr) ~= "table" or not KairoOrErr.CreateWindow then
+	warn("[TouchlineReach] Kairo UI failed to load:", KairoOrErr)
+	warn("[TouchlineReach] Reach API still works via _G.TouchlineReach")
+	return api
+end
+
+local Kairo = KairoOrErr
+
+local UserInputService = game:GetService("UserInputService")
+local CoreGui = game:GetService("CoreGui")
+
+local function isMobileUi()
+	local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+	if not UserInputService.TouchEnabled then
+		return false
+	end
+	if UserInputService.KeyboardEnabled and vp.X >= 900 then
+		return false
+	end
+	return true
+end
+
+local mobile = isMobileUi()
+
+local function windowSize()
+	local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(1280, 720)
+	if mobile then
+		local w = math.clamp(math.floor(vp.X * 0.92), 300, 420)
+		local h = math.clamp(math.floor(vp.Y * 0.62), 380, 560)
+		return UDim2.fromOffset(w, h)
+	end
+	return UDim2.fromOffset(520, 480)
+end
+
+local function statusLine()
+	local s = api.status and api.status() or {}
+	return string.format(
+		"enabled=%s  studs=%s  ballCol=%s  viz=%s  char=%s",
+		tostring(s.enabled),
+		tostring(s.studs),
+		tostring(s.ballCol),
+		tostring(s.showViz),
+		tostring(s.char or "?")
+	)
+end
+
+local Window
+
+local function fullUnload()
+	pcall(function()
+		if type(api) == "table" and type(api.cleanup) == "function" then
+			api.cleanup()
+		end
+	end)
+	pcall(function()
+		if Window and Window.Destroy then
+			Window:Destroy()
+		end
+	end)
+	pcall(function()
+		local gui = CoreGui:FindFirstChild("KairoUI")
+		if gui then
+			gui:Destroy()
+		end
+	end)
+	_G.TouchlineReach = nil
+	_G._TouchlineReach = nil
+	_G._TouchlineReachProcess = nil
+	_G.W4reHub = nil
+	print("[w4re hub] unloaded")
+end
+
+local function wireCloseAndMin()
+	local gui = CoreGui:FindFirstChild("KairoUI")
+	if not gui then
+		return
+	end
+
+	local closeBtn = gui:FindFirstChild("Close", true)
+	if closeBtn and closeBtn:IsA("GuiButton") then
+		closeBtn.Activated:Connect(function()
+			task.defer(fullUnload)
+		end)
+	end
+
+	local minBtn = gui:FindFirstChild("MobileMinimizeButton")
+	if minBtn and mobile then
+		local vp = workspace.CurrentCamera and workspace.CurrentCamera.ViewportSize or Vector2.new(400, 700)
+		minBtn.Size = UDim2.fromOffset(48, 48)
+		minBtn.Position = UDim2.fromOffset(16, math.floor(vp.Y * 0.72))
+		minBtn.BackgroundTransparency = 0.1
+	end
+end
+
+local function polishMobileLayout()
+	if not mobile then
+		return
+	end
+	local gui = CoreGui:FindFirstChild("KairoUI")
+	if not gui then
+		return
+	end
+
+	for _, d in ipairs(gui:GetDescendants()) do
+		if d:IsA("UIListLayout") then
+			if d.Padding.Offset < 10 then
+				d.Padding = UDim.new(0, 12)
+			end
+		end
+
+		if d:IsA("Frame") then
+			local n = d.Name
+			if n == "Toggle" or n == "Button" or n == "Slider" or n == "Input" or n == "Dropdown" then
+				local h = d.Size.Y.Offset
+				if h > 0 and h < 56 then
+					d.Size = UDim2.new(d.Size.X.Scale, d.Size.X.Offset, 0, 56)
+				end
+			end
+		end
+
+		if d:IsA("TextLabel") then
+			if d.Name == "ToggleContent" or d.Name == "ButtonContent" or d.Name == "SliderContent" then
+				if d.Text == "" or d.Text == nil then
+					d.Visible = false
+				end
+			end
+			if d.Name == "ToggleTitle" or d.Name == "ButtonTitle" or d.Name == "SliderTitle" then
+				d.TextSize = math.max(d.TextSize, 15)
+			end
+		end
+	end
+end
+
+Window = Kairo:CreateWindow({
+	Title = "w4re hub",
+	Theme = "Crimson",
+	Size = windowSize(),
+	Center = true,
+	Draggable = true,
+	Resize = not mobile,
+	Badges = {},
+	MinimizeKey = Enum.KeyCode.RightShift,
+	MinimizeButton = true,
+	MinimizeButton_Image = "rbxassetid://116850882259653",
+	Config = {
+		Enabled = true,
+		Folder = "w4re_Config",
+		AutoLoad = true,
+	},
+})
+
+local ReachTab = Window:CreateTab("Reach", "rbxassetid://16932740082")
+
+local st0 = api.status and api.status() or {}
+
+Window:AddToggle(
+	ReachTab,
+	"Enabled",
+	mobile and "" or "Turn reach on / off",
+	st0.enabled ~= false,
+	function(on)
+		if on then
+			api.enable()
+		else
+			api.disable()
+		end
+	end,
+	"TR_Enabled"
+)
+
+Window:AddSlider(
+	ReachTab,
+	"Studs",
+	"",
+	1,
+	10,
+	tonumber(st0.studs) or 8,
+	function(value)
+		api.setStuds(value)
+	end,
+	"TR_Studs"
+)
+
+Window:AddToggle(
+	ReachTab,
+	"Ball Collision",
+	"",
+	st0.ballCol ~= false,
+	function(on)
+		api.setBallCol(on)
+	end,
+	"TR_BallCol"
+)
+
+Window:AddToggle(
+	ReachTab,
+	"Show Radius",
+	"",
+	st0.showViz == true,
+	function(on)
+		api.setViz(on)
+	end,
+	"TR_Viz"
+)
+
+Window:AddButton(
+	ReachTab,
+	"Status",
+	"",
+	"rbxassetid://16932740082",
+	function()
+		local line = statusLine()
+		print("[w4re hub]", line)
+		Window:Notify({
+			Title = "w4re hub",
+			Description = "Status",
+			Content = line,
+			Color = Color3.fromRGB(200, 0, 50),
+			Delay = 4,
+		})
+	end
+)
+
+task.defer(function()
+	task.wait(0.08)
+	wireCloseAndMin()
+	polishMobileLayout()
+end)
+
+_G.W4reHub = {
+	unload = fullUnload,
+	mobile = mobile,
+}
+
+print(string.format("[w4re hub] ready | %s | X = unload | min = hide", mobile and "mobile" or "pc"))
+
+return api
